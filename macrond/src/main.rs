@@ -2,6 +2,7 @@ mod message;
 
 use core::fmt;
 use std::{process::{self, Command}, error::Error};
+use std::str;
 
 use config_file::FromConfigFile;
 use log::{info, error};
@@ -24,6 +25,7 @@ struct MacronConfig {
 #[derive(Serialize, Deserialize)]
 struct ServerConfig {
     url: String,
+    dev: bool,
     email: String,
     password: String,
     //auth_key: String,
@@ -56,7 +58,9 @@ fn exec_function(id: usize, config: &MacronConfig) -> Result<(), Box<dyn Error +
         Some(func) => {
 
             let mut cmd = Command::new(&func.command);
-            cmd.output()?;
+            //cmd.arg("&");
+            //cmd.output()?;
+            cmd.spawn()?;
         }
         None => {
             return Err(Box::new(MacronError{ body: "Function not found".to_string() }))
@@ -66,10 +70,17 @@ fn exec_function(id: usize, config: &MacronConfig) -> Result<(), Box<dyn Error +
 
 }
 
-async fn login(url: String, msg: &CredentialMessage) -> Result<String, Box<dyn Error + Send + Sync>> {
+async fn login(url: String, msg: &CredentialMessage, dev: bool) -> Result<String, Box<dyn Error + Send + Sync>> {
+    //TODO: Implement handling for incorrect password
     let client = reqwest::Client::new();
-    let request_url = &(String::from("https://") + &url + "/v2/login");
-    //let request_url = &(String::from("http://") + &url + "/v2/login");
+    let request_url: String;
+    if dev {
+        request_url = String::from("http://") + &url + "/v1/login";
+    } else {
+        request_url = String::from("https://") + &url + "/v1/login";
+    }
+    //let request_url = &(String::from("http://") + &url + "/v1/login");
+    info!("Sending login request");
     let response = client
         .post(request_url)
         .header(CONTENT_TYPE, "application/json")
@@ -79,6 +90,9 @@ async fn login(url: String, msg: &CredentialMessage) -> Result<String, Box<dyn E
         .await?
         .bytes()
     .await?;
+
+    let response_str = str::from_utf8(&response).unwrap_or("Error parsing response.");
+    info!("Login response: {}", response_str);
 
     let auth_response: AuthMessage = serde_json::from_slice(&response)?;
 
@@ -112,12 +126,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>>{
     
     let creds = &CredentialMessage { email: config.server.email.clone(), password: config.server.password.clone() };
     
-    let session_token = login(config.server.url.clone(), creds).await?;
+    let session_token = login(config.server.url.clone(), creds, config.server.dev).await?;
     let query = "session_token=".to_owned() + &session_token;
-    let url_string = &(String::from("wss://") + &config.server.url + "/v2/receiver");
-    //let url_string = &(String::from("ws://") + &config.server.url + "/v2/receiver");
 
-    let mut url = Url::parse(url_string).unwrap(); 
+    let url_string: String;
+    if config.server.dev {
+        url_string = String::from("ws://") + &config.server.url + "/v1/ws/receiver";
+    } else {
+        url_string = String::from("wss://") + &config.server.url + "/v1/ws/receiver";
+    };
+    //let url_string = &(String::from("ws://") + &config.server.url + "/v1/ws/receiver");
+
+    let mut url = Url::parse(&url_string).unwrap(); 
 
     url.set_query(Some(query.as_str()));
     info!("Connecting to websocket endpoint at url {}", url);
@@ -132,9 +152,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>>{
         functions: None,
     };
 
+    info!("Sending auth message");
     let auth_json = serde_json::to_string(&auth_msg)?;
     socket.send(Message::Text(auth_json))?;
 
+    info!("Receiving auth confrimation");
     let auth_response_json = socket.read()?;
     info!("Server response: {}", auth_response_json);
     let auth_response: InboundMessage = serde_json::from_str(&auth_response_json.to_string())?;
